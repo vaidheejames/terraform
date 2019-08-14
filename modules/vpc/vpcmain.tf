@@ -1,10 +1,17 @@
-############
-## AWS Provider
-############
+##Created in the below structure
+# VPC
+# IGW
+# Public RT
+# Public Route
+# Private RT
+# Private Route
+# Public Subnet
+# Private Subnet
+# Public RT Association
+# Private RT Association
 
-# Retrieve AWS credentials from env variables AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
-provider "aws" {
-  region = "${var.aws_region}"
+locals {
+  max_subnet_length = "${max(length(var.private_subnets))}" #length(var.elasticache_subnets), length(var.database_subnets), length(var.redshift_subnets))
 }
 
 ############
@@ -12,104 +19,106 @@ provider "aws" {
 ############
 
 resource "aws_vpc" "vpc" {
+  count = "${var.create_vpc ? 1 : 0}"
   cidr_block = "${var.vpc_cidr}"
-  enable_dns_hostnames = true
+  instance_tenancy = "${var.instance_tenancy}"
+  enable_dns_hostnames = "${var.enable_dns_hostnames}"
+  enable_dns_support = "${var.enable_dns_support}"
 
   tags = "${merge(map("Name", var.vpc_name), var.tags)}"
 }
 
-resource "aws_internet_gateway" "gw" {
+resource "aws_internet_gateway" "this" {
+  count = "${var.create_vpc && length(var.public_subnets) > 0 ? 1 : 0}"
+  
   vpc_id = "${aws_vpc.vpc.id}"
 
   tags = "${merge(map("Name", var.vpc_name), var.tags)}"
 }
 
-############
+################
+# Publiс routes
+################
+resource "aws_route_table" "public" {
+  count = "${var.create_vpc && length(var.public_subnets) > 0 ? 1 : 0}"
+
+  vpc_id = "${aws_vpc.vpc_id}"
+
+  tags = "${merge(map("Name", format("rt_%s_${var.public_subnet_suffix}", var.name)), var.tags, var.public_route_table_tags)}"
+}
+
+resource "aws_route" "public_internet_gateway" {
+  count = "${var.create_vpc && length(var.public_subnets) > 0 ? 1 : 0}"
+
+  route_table_id         = "${aws_route_table.public.id}"
+  destination_cidr_block = "0.0.0.0/0"
+  gateway_id             = "${aws_internet_gateway.this.id}"
+
+  timeouts {
+    create = "5m"
+  }
+}
+
+#################
+# Private routes
+# There are so many routing tables as the largest amount of subnets of each type (really?)
+#################
+resource "aws_route_table" "private" {
+  count = "${var.create_vpc && local.max_subnet_length > 0 ? 1 : 0}"
+
+  vpc_id = "${aws_vpc.vpc_id}"
+
+  tags = "${merge(map("Name", format("rt_%s_${var.private_subnet_suffix}", var.name)), var.tags, var.private_route_table_tags)}"
+
+  lifecycle {
+    # When attaching VPN gateways it is common to define aws_vpn_gateway_route_propagation
+    # resources that manipulate the attributes of the routing table (typically for the private subnets)
+    ignore_changes = ["propagating_vgws"]
+  }
+}
+
+#################
 ## Public Subnets
-############
+#################
 
-# Subnet (public)
-resource "aws_subnet" "public_subnet" {
-  count = "${length(var.aws_zones)}"
-  vpc_id = "${aws_vpc.vpc.id}"
-  cidr_block = "${cidrsubnet(var.vpc_cidr, 8, count.index)}"
-  availability_zone = "${var.aws_zones[count.index]}"
-  map_public_ip_on_launch = true
+resource "aws_subnet" "public" {
+  count = "${var.create_vpc && length(var.public_subnets) > 0 ? length(var.public_subnets) : 0}"
 
-  tags = "${merge(map("Name", format("%v-public-%v", var.vpc_name, var.aws_zones[count.index])), var.tags)}"
+  vpc_id                  = "${aws_vpc.vpc_id}"
+  cidr_block              = "${element(concat(var.public_subnets, list("")), count.index)}"
+  availability_zone       = "${element(var.azs, count.index)}"
+  map_public_ip_on_launch = "${var.map_public_ip_on_launch}"
+
+  tags = "${merge(map("Name", format("sn_%s_${var.public_subnet_suffix}_%s", var.name, element(var.sub_names, count.index))), var.tags, var.public_subnet_tags)}"
 }
 
-############
-## Private Subnets
-############
+#################
+# Private subnet
+#################
+resource "aws_subnet" "private" {
+  count = "${var.create_vpc && length(var.private_subnets) > 0 ? length(var.private_subnets) : 0}"
 
-resource "aws_eip" "nat" {
-  count = "${var.private_subnets == "true" ? length(var.aws_zones) : 0}"
-  vpc      = true
+  vpc_id            = "${aws_vpc.vpc_id}"
+  cidr_block        = "${var.private_subnets[count.index]}"
+  availability_zone = "${element(var.azs, count.index)}"
+
+  tags = "${merge(map("Name", format("sn_%s_${var.private_subnet_suffix}_%s", var.name, element(var.sub_names, count.index))), var.tags, var.private_subnet_tags)}"
 }
 
-resource "aws_nat_gateway" "nat" {
-  count = "${var.private_subnets == "true" ? length(var.aws_zones) : 0}"
-  allocation_id = "${element(aws_eip.nat.*.id, count.index)}"
-  subnet_id = "${element(aws_subnet.public_subnet.*.id, count.index)}"
+##########################
+# Route table association
+##########################
 
-  tags = "${merge(map("Name", format("%v-nat-%v", var.vpc_name, var.aws_zones[count.index])), var.tags)}"
+resource "aws_route_table_association" "public" {
+  count = "${var.create_vpc && length(var.public_subnets) > 0 ? length(var.public_subnets) : 0}"
 
-  depends_on = ["aws_eip.nat", "aws_internet_gateway.gw", "aws_subnet.public_subnet"]
+  subnet_id      = "${element(aws_subnet.public.*.id, count.index)}"
+  route_table_id = "${aws_route_table.public.id}"
 }
 
-# Subnet (private)
-resource "aws_subnet" "private_subnet" {
-  count = "${var.private_subnets == "true" ? length(var.aws_zones) : 0}"
-  vpc_id = "${aws_vpc.vpc.id}"
-  cidr_block = "${cidrsubnet(var.vpc_cidr, 8, count.index + length(var.aws_zones))}"
-  availability_zone = "${var.aws_zones[count.index]}"
-  map_public_ip_on_launch = false
+resource "aws_route_table_association" "private" {
+  count = "${var.create_vpc && length(var.private_subnets) > 0 ? length(var.private_subnets) : 0}"
 
-  tags = "${merge(map("Name", format("%v-private-%v", var.vpc_name, var.aws_zones[count.index])), var.tags)}"
-}
-
-############
-## Routing (public subnets)
-############
-
-resource "aws_route_table" "route" {
-  vpc_id = "${aws_vpc.vpc.id}"
-
-  # Default route through Internet Gateway
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = "${aws_internet_gateway.gw.id}"
-  }
-
-  tags = "${merge(map("Name", format("%v-public-route-table", var.vpc_name)), var.tags)}"
-}
-
-resource "aws_route_table_association" "route" {
-  count = "${length(var.aws_zones)}"
-  subnet_id = "${element(aws_subnet.public_subnet.*.id, count.index)}"
-  route_table_id = "${aws_route_table.route.id}"
-}
-
-############
-## Routing (private subnets)
-############
-
-resource "aws_route_table" "private_route" {
-  count = "${var.private_subnets == "true" ? length(var.aws_zones) : 0}"
-  vpc_id = "${aws_vpc.vpc.id}"
-
-  # Default route through NAT
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = "${element(aws_nat_gateway.nat.*.id, count.index)}"
-  }
-
-  tags = "${merge(map("Name", format("%v-private-route-table-%v", var.vpc_name, var.aws_zones[count.index])), var.tags)}"
-}
-
-resource "aws_route_table_association" "private_route" {
-  count = "${var.private_subnets == "true" ? length(var.aws_zones) : 0}"
-  subnet_id = "${element(aws_subnet.private_subnet.*.id, count.index)}"
-  route_table_id = "${element(aws_route_table.private_route.*.id, count.index)}"
+  subnet_id      = "${element(aws_subnet.private.*.id, count.index)}"
+  route_table_id = "${aws_route_table.private.id}"
 }

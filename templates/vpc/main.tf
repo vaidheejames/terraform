@@ -1,23 +1,35 @@
 module "vpc" {
-  source = "../../modules/vpc"
+  source = "../../../modules/vpc"
 
-  aws_region = "${var.aws_region}"
-  aws_zones = "${var.aws_zones}"
-  vpc_name = "${var.vpc_name}"
-  vpc_cidr = "${var.vpc_cidr}"
-  private_subnets = "${var.private_subnets}"
-
-  ## Tags
-  tags = "${var.tags}"
+  name = "${var.name}"
+  cidr = "${var.network["cidr"]}"
+  azs             = ["${var.location["az1"]}", "${var.location["az2"]}", "${var.location["az3"]}"]
+  private_subnets = ["${var.network["sub_pri_1a"]}", "${var.network["sub_pri_1b"]}", "${var.network["sub_pri_1c"]}", "${var.network["sub_pri_2a"]}", "${var.network["sub_pri_2b"]}", "${var.network["sub_pri_2c"]}"]
+  public_subnets  = ["${var.network["sub_pub_1a"]}", "${var.network["sub_pub_1b"]}", "${var.network["sub_pub_1c"]}", "${var.network["sub_pub_2a"]}", "${var.network["sub_pub_2b"]}", "${var.network["sub_pub_2c"]}"]
+  tags = "${var.common_tags}"
 }
-output "vpc" {
+
+output "vpc_id" {
   value = "${module.vpc.vpc_id}"
 }
 
-output "subnets" {
-  value = "${module.vpc.subnet_ids}"
+output "vpc_default_security_group_id" {
+  value = "${module.vpc.default_security_group_id}"
 }
 
-output "private_subnets" {
-  value = "${module.vpc.private_subnet_ids}"
+output "private_subnet_ids" {
+  value = "${module.vpc.private_subnets}"
+}
+
+output "public_subnet_ids" {
+  value = "${module.vpc.public_subnets}"
+}
+
+output "public_route_table_ids" {
+  value = "${module.vpc.public_route_table_ids}"
+}
+
+
+output "private_route_table_ids" {
+  value = "${module.vpc.private_route_table_ids}"
 }
